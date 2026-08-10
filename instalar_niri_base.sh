@@ -44,10 +44,96 @@ PKGS=(
     grim              # captura de pantalla
     slurp             # selección de área
     swaybg            # fondo de pantalla estático (opcional)
+    neovim            # editor
+    curl              # descarga de tarballs
+    gnupg             # verificación de firmas
 )
 
 echo "==> Instalando paquetes: ${PKGS[*]}"
 sudo pacman -S --needed --noconfirm "${PKGS[@]}"
+
+# ------------------------------------------------------------------
+# 1b. Helium Browser (tarball oficial, sin AUR)
+# ------------------------------------------------------------------
+echo "==> Instalando Helium Browser (tarball oficial de GitHub, sin AUR)..."
+
+HELIUM_OPT_DIR="/opt/helium"
+HELIUM_TMP="$(mktemp -d)"
+
+# Obtiene la URL del tarball x86_64 de la última release estable
+HELIUM_TARBALL_URL="$(curl -fsSL https://api.github.com/repos/imputnet/helium-linux/releases/latest \
+    | grep -o '"browser_download_url": *"[^"]*x86_64_linux\.tar\.xz"' \
+    | grep -o 'https://[^"]*')"
+
+if [[ -z "$HELIUM_TARBALL_URL" ]]; then
+    echo "ADVERTENCIA: no se pudo determinar la URL del tarball de Helium. Omitiendo su instalación." >&2
+else
+    echo "==> Descargando: $HELIUM_TARBALL_URL"
+    curl -fsSL -o "$HELIUM_TMP/helium.tar.xz" "$HELIUM_TARBALL_URL"
+
+    # ---- Verificación de firma GPG ----
+    HELIUM_ASC_URL="${HELIUM_TARBALL_URL}.asc"
+    HELIUM_GPG_HOME="$HELIUM_TMP/gnupg"
+    mkdir -p "$HELIUM_GPG_HOME"
+    chmod 700 "$HELIUM_GPG_HOME"
+
+    echo "==> Descargando firma: $HELIUM_ASC_URL"
+    if curl -fsSL -o "$HELIUM_TMP/helium.tar.xz.asc" "$HELIUM_ASC_URL"; then
+        echo "==> Importando clave pública de Helium (351601AD01D6378E)..."
+        curl -fsSL https://raw.githubusercontent.com/imputnet/helium-linux/main/pubkey.asc \
+            | gpg --homedir "$HELIUM_GPG_HOME" --import
+
+        echo "==> Verificando firma del tarball..."
+        if gpg --homedir "$HELIUM_GPG_HOME" --verify "$HELIUM_TMP/helium.tar.xz.asc" "$HELIUM_TMP/helium.tar.xz"; then
+            echo "==> Firma verificada correctamente."
+        else
+            echo "ERROR: la firma GPG del tarball de Helium no es válida. Abortando instalación de Helium." >&2
+            rm -rf "$HELIUM_TMP"
+            HELIUM_TARBALL_URL=""
+        fi
+    else
+        echo "ADVERTENCIA: no se encontró archivo .asc para verificar la firma. Se omite verificación e instalación de Helium por seguridad." >&2
+        HELIUM_TARBALL_URL=""
+    fi
+fi
+
+if [[ -n "$HELIUM_TARBALL_URL" ]]; then
+    mkdir -p "$HELIUM_TMP/extracted"
+    tar -xf "$HELIUM_TMP/helium.tar.xz" -C "$HELIUM_TMP/extracted"
+
+    # El tarball trae una carpeta interna (p.ej. helium-0.15.1.1-x86_64_linux/)
+    HELIUM_SRC_DIR="$(find "$HELIUM_TMP/extracted" -maxdepth 1 -mindepth 1 -type d | head -n1)"
+
+    sudo rm -rf "$HELIUM_OPT_DIR"
+    sudo mkdir -p "$HELIUM_OPT_DIR"
+    sudo cp -r "$HELIUM_SRC_DIR"/. "$HELIUM_OPT_DIR"/
+
+    # Detecta el binario principal dentro del paquete
+    HELIUM_BIN="$(find "$HELIUM_OPT_DIR" -maxdepth 1 -type f -iname 'helium*' ! -name '*.so*' | head -n1)"
+    if [[ -z "$HELIUM_BIN" ]]; then
+        HELIUM_BIN="$HELIUM_OPT_DIR/chrome"
+    fi
+    sudo chmod +x "$HELIUM_BIN"
+    sudo ln -sf "$HELIUM_BIN" /usr/local/bin/helium-browser
+
+    # Icono y entrada .desktop
+    HELIUM_ICON="$(find "$HELIUM_OPT_DIR" -iname 'product_logo*256*.png' -o -iname 'icon*.png' | head -n1)"
+    sudo mkdir -p /usr/share/applications
+    cat <<EOF2 | sudo tee /usr/share/applications/helium-browser.desktop >/dev/null
+[Desktop Entry]
+Name=Helium
+Comment=Navegador basado en Chromium sin Google (Helium)
+Exec=/usr/local/bin/helium-browser %U
+Terminal=false
+Type=Application
+Icon=${HELIUM_ICON:-web-browser}
+Categories=Network;WebBrowser;
+EOF2
+
+    echo "==> Helium instalado en $HELIUM_OPT_DIR (comando: helium-browser)"
+fi
+
+rm -rf "$HELIUM_TMP"
 
 # ------------------------------------------------------------------
 # 2. Estructura de configuración
@@ -94,6 +180,7 @@ environment {
 
 spawn-at-startup "qs" "-c" "base-bar"
 spawn-at-startup "polkit-gnome-authentication-agent-1"
+spawn-at-startup "swaybg" "-c" "#1e1e2e"
 
 layout {
     gaps 8
@@ -119,6 +206,9 @@ binds {
 
     // Lanzador de apps
     Mod+D { spawn "nwg-drawer" "-r"; }
+
+    // Navegador
+    Mod+B { spawn "helium-browser"; }
 
     // Cerrar ventana
     Mod+Q { close-window; }
@@ -158,10 +248,66 @@ echo "    Recuerda ajustar el nombre del output con: niri msg outputs"
 # ------------------------------------------------------------------
 cat > "$QS_DIR/shell.qml" <<'EOF'
 import Quickshell
+import Quickshell.Io
 import QtQuick
 import QtQuick.Layouts
 
 ShellRoot {
+    // ----------------------------------------------------------------
+    // Estado: workspaces de Niri, batería y red, refrescados por poll
+    // ----------------------------------------------------------------
+    property var workspaces: []
+    property string batteryText: "N/A"
+    property string netText: "N/A"
+
+    Process {
+        id: workspacesProc
+        command: ["niri", "msg", "-j", "workspaces"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    workspaces = JSON.parse(text)
+                } catch (e) {
+                    workspaces = []
+                }
+            }
+        }
+    }
+
+    Process {
+        id: batteryProc
+        command: ["sh", "-c", "cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -n1"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                var t = text.trim()
+                batteryText = t.length > 0 ? (t + "%") : "sin batería"
+            }
+        }
+    }
+
+    Process {
+        id: netProc
+        command: ["sh", "-c", "ip route get 1.1.1.1 2>/dev/null | awk '{print $5; exit}'"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                var t = text.trim()
+                netText = t.length > 0 ? t : "sin red"
+            }
+        }
+    }
+
+    Timer {
+        interval: 2000
+        running: true
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: {
+            workspacesProc.running = true
+            batteryProc.running = true
+            netProc.running = true
+        }
+    }
+
     PanelWindow {
         anchors {
             top: true
@@ -175,15 +321,95 @@ ShellRoot {
             anchors.fill: parent
             anchors.leftMargin: 12
             anchors.rightMargin: 12
+            spacing: 16
+
+            // Lanzador
+            Rectangle {
+                width: 28
+                height: 24
+                radius: 4
+                color: launcherArea.containsMouse ? "#313244" : "transparent"
+
+                Text {
+                    anchors.centerIn: parent
+                    text: "󰀻"
+                    color: "#cdd6f4"
+                    font.pixelSize: 16
+                }
+
+                MouseArea {
+                    id: launcherArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: launcherProc.running = true
+                }
+            }
+
+            Process {
+                id: launcherProc
+                command: ["nwg-drawer", "-r"]
+            }
+
+            // Workspaces
+            RowLayout {
+                spacing: 6
+
+                Repeater {
+                    model: workspaces
+                    delegate: Rectangle {
+                        width: 20
+                        height: 20
+                        radius: 4
+                        color: modelData.is_focused ? "#89b4fa" : "#313244"
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: modelData.idx !== undefined ? modelData.idx : ""
+                            color: modelData.is_focused ? "#1e1e2e" : "#cdd6f4"
+                            font.pixelSize: 11
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: switchProc.runWith(modelData.idx)
+                        }
+                    }
+                }
+            }
+
+            Process {
+                id: switchProc
+                property int targetIdx: 1
+                command: ["niri", "msg", "action", "focus-workspace", String(targetIdx)]
+                function runWith(idx) {
+                    targetIdx = idx
+                    running = true
+                }
+            }
 
             Text {
                 text: "niri"
-                color: "#cdd6f4"
+                color: "#6c7086"
                 font.bold: true
             }
 
             Item { Layout.fillWidth: true }
 
+            // Red
+            Text {
+                text: "🌐 " + netText
+                color: "#cdd6f4"
+                font.pixelSize: 12
+            }
+
+            // Batería
+            Text {
+                text: "🔋 " + batteryText
+                color: "#cdd6f4"
+                font.pixelSize: 12
+            }
+
+            // Reloj
             Text {
                 id: clock
                 color: "#cdd6f4"
@@ -213,9 +439,11 @@ fi
 
 echo
 echo "==> Instalación completa."
-echo "    - Terminal:  kitty      (Mod+Return / Mod+T)"
-echo "    - Lanzador:  nwg-drawer (Mod+D)"
-echo "    - Barra:     quickshell (autolanzada al iniciar Niri)"
+echo "    - Terminal:  kitty            (Mod+Return / Mod+T)"
+echo "    - Lanzador:  nwg-drawer       (Mod+D)"
+echo "    - Navegador: helium-browser   (Mod+B)"
+echo "    - Editor:    neovim (nvim)"
+echo "    - Barra:     quickshell       (autolanzada al iniciar Niri)"
 echo
 echo "Para probar sin reiniciar sesión (dentro de la VM con TTY o sesión anidada):"
 echo "    niri-session"
