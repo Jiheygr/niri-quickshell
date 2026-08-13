@@ -47,6 +47,7 @@ PKGS=(
     neovim            # editor
     curl              # descarga de tarballs
     gnupg             # verificación de firmas
+    upower            # servicio de batería para Quickshell.Services.UPower
 )
 
 echo "==> Instalando paquetes: ${PKGS[*]}"
@@ -114,7 +115,13 @@ if [[ -n "$HELIUM_TARBALL_URL" ]]; then
         HELIUM_BIN="$HELIUM_OPT_DIR/chrome"
     fi
     sudo chmod +x "$HELIUM_BIN"
-    sudo ln -sf "$HELIUM_BIN" /usr/local/bin/helium-browser
+
+    # Wrapper para forzar backend nativo de Wayland (Niri no tiene X11/XWayland)
+    sudo tee /usr/local/bin/helium-browser >/dev/null <<EOF3
+#!/usr/bin/env bash
+exec "$HELIUM_BIN" --ozone-platform=wayland --enable-features=WaylandWindowDecorations "\$@"
+EOF3
+    sudo chmod +x /usr/local/bin/helium-browser
 
     # Icono y entrada .desktop
     HELIUM_ICON="$(find "$HELIUM_OPT_DIR" -iname 'product_logo*256*.png' -o -iname 'icon*.png' | head -n1)"
@@ -249,16 +256,20 @@ echo "    Recuerda ajustar el nombre del output con: niri msg outputs"
 cat > "$QS_DIR/shell.qml" <<'EOF'
 import Quickshell
 import Quickshell.Io
+import Quickshell.Services.UPower
 import QtQuick
 import QtQuick.Layouts
 
 ShellRoot {
     // ----------------------------------------------------------------
-    // Estado: workspaces de Niri, batería y red, refrescados por poll
+    // Estado: workspaces de Niri (poll, no hay socket de eventos simple
+    // aún expuesto por Niri para IPC directo desde QML) y red (poll ligero).
+    // La batería usa UPower nativo -- reactivo, sin polling.
     // ----------------------------------------------------------------
     property var workspaces: []
-    property string batteryText: "N/A"
     property string netText: "N/A"
+
+    readonly property var battery: UPower.displayDevice
 
     Process {
         id: workspacesProc
@@ -270,17 +281,6 @@ ShellRoot {
                 } catch (e) {
                     workspaces = []
                 }
-            }
-        }
-    }
-
-    Process {
-        id: batteryProc
-        command: ["sh", "-c", "cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -n1"]
-        stdout: StdioCollector {
-            onStreamFinished: {
-                var t = text.trim()
-                batteryText = t.length > 0 ? (t + "%") : "sin batería"
             }
         }
     }
@@ -303,7 +303,6 @@ ShellRoot {
         triggeredOnStart: true
         onTriggered: {
             workspacesProc.running = true
-            batteryProc.running = true
             netProc.running = true
         }
     }
@@ -402,9 +401,16 @@ ShellRoot {
                 font.pixelSize: 12
             }
 
-            // Batería
+            // Batería (UPower nativo, reactivo -- ver mixer/volume-osd
+            // de quickshell-examples para el mismo patrón con Pipewire)
             Text {
-                text: "🔋 " + batteryText
+                visible: battery && battery.isLaptopBattery
+                text: {
+                    if (!battery || !battery.isLaptopBattery) return ""
+                    var pct = Math.round((battery.percentage ?? 0) * 100)
+                    var charging = battery.state === UPowerDeviceState.Charging
+                    return (charging ? "⚡ " : "🔋 ") + pct + "%"
+                }
                 color: "#cdd6f4"
                 font.pixelSize: 12
             }
