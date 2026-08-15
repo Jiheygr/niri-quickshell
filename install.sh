@@ -117,7 +117,7 @@ banner() {
   gum style \
     --border rounded --border-foreground 25 \
     --padding "1 4" --margin "1 0" --align center \
-    "🚀 Apps & Configuraciones Installer" "Chaotic-AUR · Noctalia · Dotfiles"
+    "🚀 Apps & Configuraciones Installer" "Chaotic-AUR · base-bar (Quickshell) · Dotfiles"
 }
 
 section() {
@@ -580,21 +580,17 @@ if $INSTALL_HYPRLAND || $INSTALL_NIRI; then
 fi
 
 # -----------------------------
-# 0.5. Noctalia Shell — automático con Hyprland/Niri (sin preguntar)
+# 0.5. base-bar (Quickshell) — automático con Niri (sin preguntar)
 # -----------------------------
-INSTALL_NOCTALIA=false
-NOCTALIA_PKG=""
-NOCTALIA_QS_PKG=""
-RESTORE_NOCTALIA_CONFIG=false
+INSTALL_BASEBAR=false
 
 if $INSTALL_KDE; then
-  gum style --foreground 244 "Noctalia Shell es para Hyprland/Niri — se omite con KDE Plasma."
-elif $INSTALL_HYPRLAND || $INSTALL_NIRI; then
-  INSTALL_NOCTALIA=true
-  NOCTALIA_PKG="noctalia-git"
-  NOCTALIA_QS_PKG="noctalia-qs-git"
-  RESTORE_NOCTALIA_CONFIG=false
-  gum style --foreground 244 "Noctalia Shell se instala automáticamente, limpio (elegiste Hyprland y/o Niri)."
+  gum style --foreground 244 "base-bar (Quickshell) es para Niri — se omite con KDE Plasma."
+elif $INSTALL_HYPRLAND && ! $INSTALL_NIRI; then
+  gum style --foreground 244 "base-bar (Quickshell) por ahora solo está integrada para Niri — se omite con Hyprland."
+elif $INSTALL_NIRI; then
+  INSTALL_BASEBAR=true
+  gum style --foreground 244 "base-bar (Quickshell) se instala automáticamente, limpio (elegiste Niri)."
 fi
 
 # -----------------------------
@@ -966,13 +962,8 @@ if $INSTALL_NIRI; then
   fi
 fi
 
-if $INSTALL_NOCTALIA; then
-  SUMMARY_LINES+=("🎨 Noctalia Shell: sí ($NOCTALIA_PKG)")
-  if $RESTORE_NOCTALIA_CONFIG; then
-    SUMMARY_LINES+=("   • Noctalia: restaurar respaldo/noctalia")
-  else
-    SUMMARY_LINES+=("   • Noctalia: limpio (config por defecto)")
-  fi
+if $INSTALL_BASEBAR; then
+  SUMMARY_LINES+=("🎨 base-bar (Quickshell): sí — kitty, nwg-drawer, neovim, matugen")
 fi
 
 SUMMARY_LINES+=("🖥️  Terminal: $SEL_TERMINAL_EMU")
@@ -1093,6 +1084,23 @@ if $INSTALL_NIRI; then
     niri
     xwayland-satellite
     xdg-desktop-portal-gnome
+    # base-bar: barra propia en Quickshell (reemplaza a Noctalia)
+    quickshell
+    qt6-declarative
+    qt6-svg
+    qt6-wayland
+    kitty
+    nwg-drawer
+    neovim
+    matugen
+    upower
+    lm_sensors
+    grim
+    slurp
+    swaybg
+    curl
+    gnupg
+    git
   )
 fi
 
@@ -1196,19 +1204,6 @@ EOF
     sudo -u "$REAL_USER" dbus-run-session -- dconf write /org/gnome/desktop/interface/color-scheme "'prefer-dark'" 2>>"$LOG_FILE" || true
   fi
 
-  # Si Noctalia está instalado, este es el mismo apply.sh que dispara
-  # el toggle "Settings → Templates → GTK 3/4": importa noctalia.css a
-  # gtk.css y sincroniza adw-gtk3/color-scheme. Lo corremos directo acá
-  # para no depender de que abras Noctalia y actives el toggle a mano.
-  # Ref: https://docs.noctalia.dev/v5/templates/official/gtk-qt/
-  for GTK_APPLY_SH in /usr/share/noctalia/assets/templates/gtk/apply.sh /usr/local/share/noctalia/assets/templates/gtk/apply.sh; do
-    if [ -x "$GTK_APPLY_SH" ]; then
-      sudo -u "$REAL_USER" bash "$GTK_APPLY_SH" dark >>"$LOG_FILE" 2>&1 || true
-      gum style --foreground 82 "✅ apply.sh de Noctalia (GTK) ejecutado — sync de adw-gtk3/color-scheme aplicado."
-      break
-    fi
-  done
-
   gum style --foreground 82 "✅ GTK3/GTK4: Papirus-Dark + adw-gtk3-dark aplicados."
 else
   gum style --foreground 244 "⏭️  Papirus/adw-gtk-theme no están instalados (no se eligieron en 'Utilidades de escritorio') — se omite el tema GTK."
@@ -1229,7 +1224,6 @@ activate_item_on_single_click=1
 EOF
   chown -R "$REAL_USER:$REAL_USER" "$QT6CT_DIR"
   gum style --foreground 82 "✅ qt6ct: icon_theme=Papirus-Dark aplicado."
-  gum style --foreground 244 "   ⚠️ El color scheme 'noctalia' de qt6ct NO se puede seleccionar por script de forma confiable: corré 'qt6ct' una vez, pestaña Appearance → Color scheme → elegí 'noctalia' (o 'noctalia (KColorScheme)' si usás apps KDE) → Apply. Esto solo hace falta una vez por instalación limpia; si restauraste respaldo/qt6ct, este paso ya viene resuelto."
 else
   gum style --foreground 244 "⏭️  qt6ct/qt6ct-kde no está instalado (no se eligió en 'Utilidades de escritorio') — se omite el tema Qt."
 fi
@@ -1334,34 +1328,528 @@ install_aur_manual() {
 }
 
 # -----------------------------
-# 6.2. Noctalia Shell — opcional (estable o git, según lo elegido)
+# 6.2. base-bar — barra propia en Quickshell + Helium + config de Niri
 # -----------------------------
-# noctalia/noctalia-git dependen de noctalia-qs/noctalia-qs-git, que
-# también son paquetes AUR (no están en los repos oficiales). makepkg -si
-# por sí solo NO resuelve dependencias AUR-sobre-AUR, así que hay que
-# construirlos manualmente primero, sin importar qué helper se haya
-# elegido arriba.
-if $INSTALL_NOCTALIA; then
-  install_aur_manual "https://aur.archlinux.org/${NOCTALIA_QS_PKG}.git" "$NOCTALIA_QS_PKG"
-  install_aur_manual "https://aur.archlinux.org/${NOCTALIA_PKG}.git" "$NOCTALIA_PKG"
+# Los paquetes (quickshell, kitty, nwg-drawer, neovim, matugen, upower,
+# lm_sensors) ya se instalaron vía PACMAN_PKGS. Acá se arma la config
+# QML/KDL/matugen y se instala Helium desde su tarball oficial (sin
+# AUR), corriendo todo como REAL_USER porque este script principal
+# corre con sudo.
+if $INSTALL_BASEBAR; then
+  section "🎨 Configurando base-bar (Quickshell)..."
 
-  if ! $RESTORE_NOCTALIA_CONFIG; then
-    # Limpio: config por defecto (respaldo/noctalia, si se pidió, se
-    # restaura más adelante en el paso de restauración de respaldo).
-    NOCTALIA_CONFIG_DIR="$USER_HOME/.config/noctalia"
-    mkdir -p "$NOCTALIA_CONFIG_DIR"
-    if [ -f "$NOCTALIA_CONFIG_DIR/config.toml" ]; then
-      gum style --foreground 244 "⚠️ Ya existe $NOCTALIA_CONFIG_DIR/config.toml — no se sobrescribe."
-    else
-      cat >"$NOCTALIA_CONFIG_DIR/config.toml" <<'EOF'
-[theme]
-mode              = "dark"        # dark | light | auto
-source            = "builtin"     # builtin | wallpaper | community | custom
-builtin           = "Noctalia"    # bundled palette name
+  BASEBAR_CONFIG_DIR="$USER_HOME/.config/quickshell/base-bar"
+  BASEBAR_COMMON_DIR="$USER_HOME/.config/quickshell/Common"
+  MATUGEN_DIR="$USER_HOME/.config/matugen"
+  MATUGEN_TEMPLATES_DIR="$MATUGEN_DIR/templates"
+  QS_STATE_DIR="$USER_HOME/.local/state/quickshell/generated"
+
+  sudo -u "$REAL_USER" mkdir -p "$BASEBAR_CONFIG_DIR" "$BASEBAR_COMMON_DIR" \
+    "$MATUGEN_TEMPLATES_DIR" "$QS_STATE_DIR"
+
+  # --- Plantilla + config de matugen ---
+  sudo -u "$REAL_USER" tee "$MATUGEN_TEMPLATES_DIR/quickshell-colors.json" >/dev/null <<'EOF'
+{
+    "background": "{{colors.background.default.hex}}",
+    "on_background": "{{colors.on_background.default.hex}}",
+    "surface": "{{colors.surface.default.hex}}",
+    "surface_variant": "{{colors.surface_variant.default.hex}}",
+    "primary": "{{colors.primary.default.hex}}",
+    "on_primary": "{{colors.on_primary.default.hex}}",
+    "secondary": "{{colors.secondary.default.hex}}",
+    "on_secondary": "{{colors.on_secondary.default.hex}}",
+    "error": "{{colors.error.default.hex}}",
+    "outline": "{{colors.outline.default.hex}}"
+}
 EOF
-      chown -R "$REAL_USER:$REAL_USER" "$NOCTALIA_CONFIG_DIR"
-      gum style --foreground 82 "✅ $NOCTALIA_CONFIG_DIR/config.toml creado (limpio)."
+
+  sudo -u "$REAL_USER" tee "$MATUGEN_DIR/config.toml" >/dev/null <<EOF
+[config]
+mode = "dark"
+
+[templates.quickshell]
+input_path = "$MATUGEN_TEMPLATES_DIR/quickshell-colors.json"
+output_path = "$QS_STATE_DIR/colors.json"
+EOF
+
+  sudo -u "$REAL_USER" tee "$MATUGEN_DIR/aplicar-wallpaper.sh" >/dev/null <<'EOF'
+#!/usr/bin/env bash
+# Uso: aplicar-wallpaper.sh /ruta/a/wallpaper.jpg
+set -euo pipefail
+if [[ $# -ne 1 ]]; then
+    echo "Uso: $0 /ruta/a/wallpaper.jpg" >&2
+    exit 1
+fi
+matugen image "$1"
+pkill swaybg 2>/dev/null || true
+swaybg -i "$1" -m fill &
+EOF
+  chmod +x "$MATUGEN_DIR/aplicar-wallpaper.sh"
+
+  # --- Colors.qml: singleton reactivo (FileView + watchChanges) ---
+  sudo -u "$REAL_USER" tee "$BASEBAR_COMMON_DIR/Colors.qml" >/dev/null <<'EOF'
+pragma Singleton
+import Quickshell
+import Quickshell.Io
+import QtQuick
+
+Singleton {
+    id: root
+
+    property color background: "#1e1e2e"
+    property color onBackground: "#cdd6f4"
+    property color surface: "#313244"
+    property color surfaceVariant: "#45475a"
+    property color primary: "#89b4fa"
+    property color onPrimary: "#1e1e2e"
+    property color secondary: "#f5c2e7"
+    property color onSecondary: "#1e1e2e"
+    property color error: "#f38ba8"
+    property color outline: "#6c7086"
+
+    FileView {
+        id: colorsFile
+        path: Quickshell.env("HOME") + "/.local/state/quickshell/generated/colors.json"
+        watchChanges: true
+
+        onLoaded: parseColors()
+        onFileChanged: reload()
+
+        function parseColors() {
+            try {
+                var c = JSON.parse(colorsFile.text())
+                if (c.background) root.background = c.background
+                if (c.on_background) root.onBackground = c.on_background
+                if (c.surface) root.surface = c.surface
+                if (c.surface_variant) root.surfaceVariant = c.surface_variant
+                if (c.primary) root.primary = c.primary
+                if (c.on_primary) root.onPrimary = c.on_primary
+                if (c.secondary) root.secondary = c.secondary
+                if (c.on_secondary) root.onSecondary = c.on_secondary
+                if (c.error) root.error = c.error
+                if (c.outline) root.outline = c.outline
+            } catch (e) {
+                console.warn("Colors.qml: no se pudo parsear colors.json, usando paleta por defecto:", e)
+            }
+        }
+    }
+}
+EOF
+
+  # --- shell.qml: barra con estructura start/center/end ---
+  sudo -u "$REAL_USER" tee "$BASEBAR_CONFIG_DIR/shell.qml" >/dev/null <<'EOF'
+import Quickshell
+import Quickshell.Io
+import Quickshell.Services.UPower
+import Quickshell.Services.SystemTray
+import Quickshell.Bluetooth
+import QtQuick
+import QtQuick.Layouts
+import qs.Common
+
+ShellRoot {
+    property var workspaces: []
+    property string netText: "N/A"
+    property real cpuPct: 0
+    property real ramPct: 0
+    property string tempText: "N/A"
+    property string gpuText: ""
+    property string volText: "N/A"
+
+    readonly property var battery: UPower.displayDevice
+
+    Process {
+        id: workspacesProc
+        command: ["niri", "msg", "-j", "workspaces"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try { workspaces = JSON.parse(text) } catch (e) { workspaces = [] }
+            }
+        }
+    }
+
+    Process {
+        id: netProc
+        command: ["sh", "-c", "ip route get 1.1.1.1 2>/dev/null | awk '{print $5; exit}'"]
+        stdout: StdioCollector {
+            onStreamFinished: { var t = text.trim(); netText = t.length > 0 ? t : "sin red" }
+        }
+    }
+
+    Process {
+        id: cpuProc
+        command: ["sh", "-c", "top -bn1 | grep '%Cpu' | awk '{print 100-$8}'"]
+        stdout: StdioCollector {
+            onStreamFinished: { var v = parseFloat(text.trim()); if (!isNaN(v)) cpuPct = v }
+        }
+    }
+
+    Process {
+        id: ramProc
+        command: ["sh", "-c", "free | awk '/Mem:/ {printf \"%.0f\", $3/$2*100}'"]
+        stdout: StdioCollector {
+            onStreamFinished: { var v = parseFloat(text.trim()); if (!isNaN(v)) ramPct = v }
+        }
+    }
+
+    Process {
+        id: tempProc
+        command: ["sh", "-c", "sensors 2>/dev/null | grep -m1 -oE '[+-][0-9]+\\.[0-9]°C' | head -c 4"]
+        stdout: StdioCollector {
+            onStreamFinished: { var t = text.trim(); tempText = t.length > 0 ? (t + "°C") : "N/A" }
+        }
+    }
+
+    Process {
+        id: gpuProc
+        command: ["sh", "-c", "nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null"]
+        stdout: StdioCollector {
+            onStreamFinished: { var t = text.trim(); gpuText = t.length > 0 ? ("GPU " + t + "%") : "" }
+        }
+    }
+
+    Process {
+        id: volProc
+        command: ["sh", "-c", "wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null | awk '{printf \"%.0f\", $2*100}'"]
+        stdout: StdioCollector {
+            onStreamFinished: { var v = parseFloat(text.trim()); volText = !isNaN(v) ? (v + "%") : "N/A" }
+        }
+    }
+
+    Timer {
+        interval: 2000
+        running: true
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: {
+            workspacesProc.running = true
+            netProc.running = true
+            cpuProc.running = true
+            ramProc.running = true
+            tempProc.running = true
+            gpuProc.running = true
+            volProc.running = true
+        }
+    }
+
+    Process {
+        id: launcherProc
+        command: ["nwg-drawer", "-r"]
+    }
+
+    Process {
+        id: switchProc
+        property int targetIdx: 1
+        command: ["niri", "msg", "action", "focus-workspace", String(targetIdx)]
+        function runWith(idx) { targetIdx = idx; running = true }
+    }
+
+    component StatChip: Rectangle {
+        property string label: ""
+        implicitWidth: chipText.implicitWidth + 16
+        implicitHeight: 22
+        radius: height / 2
+        color: Colors.surface
+
+        Text {
+            id: chipText
+            anchors.centerIn: parent
+            text: label
+            color: Colors.onBackground
+            font.pixelSize: 11
+        }
+    }
+
+    PanelWindow {
+        anchors { top: true; left: true; right: true }
+        height: 34
+        color: Colors.background
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 12
+            anchors.rightMargin: 12
+            spacing: 10
+
+            RowLayout {
+                spacing: 6
+
+                Rectangle {
+                    width: 26; height: 22; radius: 6
+                    color: launcherArea.containsMouse ? Colors.surface : "transparent"
+                    Text { anchors.centerIn: parent; text: "󰀻"; color: Colors.onBackground; font.pixelSize: 14 }
+                    MouseArea {
+                        id: launcherArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: launcherProc.running = true
+                    }
+                }
+
+                Repeater {
+                    model: workspaces
+                    delegate: Rectangle {
+                        width: 20; height: 20; radius: 10
+                        color: modelData.is_focused ? Colors.primary : Colors.surface
+                        Text {
+                            anchors.centerIn: parent
+                            text: modelData.idx !== undefined ? modelData.idx : ""
+                            color: modelData.is_focused ? Colors.onPrimary : Colors.onBackground
+                            font.pixelSize: 11
+                        }
+                        MouseArea { anchors.fill: parent; onClicked: switchProc.runWith(modelData.idx) }
+                    }
+                }
+
+                StatChip { label: "CPU " + Math.round(cpuPct) + "%" }
+                StatChip { label: tempText; visible: tempText !== "N/A" }
+                StatChip { label: gpuText; visible: gpuText !== "" }
+                StatChip { label: "RAM " + Math.round(ramPct) + "%" }
+            }
+
+            Item { Layout.fillWidth: true }
+
+            RowLayout {
+                spacing: 10
+                Text {
+                    text: Qt.formatDateTime(clockTimer.now, "hh:mm:ss")
+                    color: Colors.onBackground
+                    font.bold: true
+                    font.pixelSize: 13
+                }
+                Text {
+                    text: Qt.formatDateTime(clockTimer.now, "ddd d MMM")
+                    color: Colors.outline
+                    font.pixelSize: 12
+                }
+            }
+
+            QtObject {
+                id: clockTimer
+                property var now: new Date()
+                Timer {
+                    interval: 1000; running: true; repeat: true
+                    onTriggered: clockTimer.now = new Date()
+                }
+            }
+
+            Item { Layout.fillWidth: true }
+
+            RowLayout {
+                spacing: 6
+
+                StatChip { label: "🌐 " + netText }
+                StatChip { label: "🔊 " + volText }
+
+                // Bluetooth: toggle real vía BlueZ (Quickshell.Bluetooth)
+                StatChip {
+                    visible: Bluetooth.defaultAdapter !== null
+                    label: {
+                        var a = Bluetooth.defaultAdapter
+                        if (!a) return ""
+                        return a.enabled ? "󰂯" : "󰂲"
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: {
+                            var a = Bluetooth.defaultAdapter
+                            if (a) a.enabled = !a.enabled
+                        }
+                    }
+                }
+
+                // Bandeja del sistema: ítems reales vía StatusNotifierItem
+                RowLayout {
+                    spacing: 4
+                    Repeater {
+                        model: SystemTray.items
+                        delegate: Rectangle {
+                            width: 20; height: 20; radius: 4
+                            color: trayItemArea.containsMouse ? Colors.surface : "transparent"
+
+                            Image {
+                                anchors.centerIn: parent
+                                width: 14; height: 14
+                                source: modelData.icon
+                                smooth: true
+                            }
+
+                            MouseArea {
+                                id: trayItemArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                onClicked: (mouse) => {
+                                    if (mouse.button === Qt.RightButton && !modelData.onlyMenu) {
+                                        modelData.display(null, 0, 0)
+                                    } else {
+                                        modelData.activate()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                StatChip {
+                    visible: battery && battery.isLaptopBattery
+                    label: {
+                        if (!battery || !battery.isLaptopBattery) return ""
+                        var pct = Math.round((battery.percentage ?? 0) * 100)
+                        var charging = battery.state === UPowerDeviceState.Charging
+                        return (charging ? "⚡ " : "🔋 ") + pct + "%"
+                    }
+                }
+
+                Rectangle {
+                    width: 26; height: 22; radius: 6
+                    color: sessionArea.containsMouse ? Colors.surface : "transparent"
+                    Text { anchors.centerIn: parent; text: "⏻"; color: Colors.error; font.pixelSize: 13 }
+                    MouseArea {
+                        id: sessionArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: sessionProc.running = true
+                    }
+                }
+
+                Process {
+                    id: sessionProc
+                    command: ["sh", "-c", "command -v wlogout >/dev/null && wlogout || niri msg action quit"]
+                }
+            }
+        }
+    }
+}
+EOF
+
+  chown -R "$REAL_USER:$REAL_USER" "$USER_HOME/.config/quickshell" "$MATUGEN_DIR" "$USER_HOME/.local/state/quickshell"
+  gum style --foreground 82 "✅ base-bar configurada en $BASEBAR_CONFIG_DIR (lanzar con: qs -c base-bar)"
+
+  # --- HyprQuickPaper: selector visual de wallpapers (Quickshell) ---
+  # Repo: https://github.com/iamsurjog/hyprquickpaper -- shell aparte de
+  # Quickshell (no vive dentro de base-bar), pensado para lanzarse con un
+  # bind. Usamos Mod+W, que quedó libre al quitar el picker de mpvpaper
+  # de Noctalia. commands.sh se reescribe para: 1) aplicar el wallpaper
+  # con swaybg (sin AUR, sin swww) y 2) disparar matugen para recolorear
+  # base-bar -- así un solo picker cubre las dos cosas.
+  section "🖼️  Instalando HyprQuickPaper (selector de wallpapers)..."
+
+  HQP_DIR="$USER_HOME/.config/quickshell/hyprquickpaper"
+  WALLPAPER_DIR="$USER_HOME/Pictures/Wallpapers"
+  HQP_CACHE_DIR="$USER_HOME/.cache/quickshell/thumbs"
+
+  sudo -u "$REAL_USER" mkdir -p "$WALLPAPER_DIR" "$HQP_CACHE_DIR"
+
+  if [ -d "$HQP_DIR/.git" ]; then
+    gum style --foreground 244 "⏭️  HyprQuickPaper ya está clonado en $HQP_DIR — se omite (corré 'git pull' ahí a mano si querés actualizarlo)."
+  else
+    rm -rf "$HQP_DIR"
+    sudo -u "$REAL_USER" git clone --depth 1 https://github.com/iamsurjog/hyprquickpaper "$HQP_DIR" >>"$LOG_FILE" 2>&1
+
+    sudo -u "$REAL_USER" tee "$HQP_DIR/config.json" >/dev/null <<EOF
+{
+    "wallpaper_path": "$WALLPAPER_DIR/",
+    "cache_path": "$HQP_CACHE_DIR/",
+    "number_of_pictures": 7,
+    "border_color": "#89b4fa",
+    "cache_batch_size": 8
+}
+EOF
+
+    sudo -u "$REAL_USER" tee "$HQP_DIR/commands.sh" >/dev/null <<'EOF'
+#!/usr/bin/env bash
+# Se llama con la ruta del wallpaper elegido como $1.
+# 1) lo aplica con swaybg (sin transición suave -- swww requiere AUR,
+#    y explícitamente no lo estamos usando en este setup)
+# 2) dispara matugen para recolorear base-bar a partir de esa imagen
+pkill swaybg 2>/dev/null || true
+swaybg -i "$1" -m fill &
+"$HOME/.config/matugen/aplicar-wallpaper.sh" "$1" >/dev/null 2>&1 &
+EOF
+    chmod +x "$HQP_DIR/commands.sh"
+
+    chown -R "$REAL_USER:$REAL_USER" "$HQP_DIR" "$WALLPAPER_DIR" "$HQP_CACHE_DIR"
+    gum style --foreground 82 "✅ HyprQuickPaper instalado en $HQP_DIR (wallpapers: $WALLPAPER_DIR)"
+    if [ -z "$(ls -A "$WALLPAPER_DIR" 2>/dev/null)" ]; then
+      gum style --foreground 244 "   ⚠️ $WALLPAPER_DIR está vacía todavía — poné imágenes ahí antes de abrir el picker (Mod+W)."
     fi
+  fi
+
+  # --- Helium Browser: tarball oficial + verificación GPG, sin AUR ---
+  # Si ya tienes helium-browser-bin instalado (por ejemplo vía
+  # Chaotic-AUR, como en tu install.sh anterior), NO se reinstala por
+  # tarball -- evita terminar con dos Heliums en paralelo (/opt/helium
+  # vs /opt/helium-browser-bin). Tus binds existentes que apuntan a
+  # /opt/helium-browser-bin/helium-wrapper siguen intactos.
+  if pacman -Qi helium-browser-bin &>/dev/null; then
+    gum style --foreground 244 "⏭️  helium-browser-bin ya está instalado (Chaotic-AUR) — se omite la instalación por tarball para no duplicar."
+  else
+  section "🌐 Instalando Helium Browser (tarball oficial, con verificación GPG)..."
+
+  HELIUM_OPT_DIR="/opt/helium"
+  HELIUM_TMP="$(mktemp -d)"
+
+  HELIUM_TARBALL_URL="$(curl -fsSL https://api.github.com/repos/imputnet/helium-linux/releases/latest \
+    | grep -o '"browser_download_url": *"[^"]*x86_64_linux\.tar\.xz"' \
+    | grep -o 'https://[^"]*')"
+
+  if [[ -z "$HELIUM_TARBALL_URL" ]]; then
+    gum style --foreground 196 "⚠️ No se pudo determinar la URL del tarball de Helium. Se omite su instalación."
+  else
+    curl -fsSL -o "$HELIUM_TMP/helium.tar.xz" "$HELIUM_TARBALL_URL"
+
+    HELIUM_ASC_URL="${HELIUM_TARBALL_URL}.asc"
+    HELIUM_GPG_HOME="$HELIUM_TMP/gnupg"
+    mkdir -p "$HELIUM_GPG_HOME"
+    chmod 700 "$HELIUM_GPG_HOME"
+
+    if curl -fsSL -o "$HELIUM_TMP/helium.tar.xz.asc" "$HELIUM_ASC_URL"; then
+      curl -fsSL https://raw.githubusercontent.com/imputnet/helium-linux/main/pubkey.asc \
+        | gpg --homedir "$HELIUM_GPG_HOME" --import >/dev/null 2>&1
+
+      if gpg --homedir "$HELIUM_GPG_HOME" --verify "$HELIUM_TMP/helium.tar.xz.asc" "$HELIUM_TMP/helium.tar.xz" 2>/dev/null; then
+        gum style --foreground 82 "✅ Firma GPG de Helium verificada correctamente."
+
+        mkdir -p "$HELIUM_TMP/extracted"
+        tar -xf "$HELIUM_TMP/helium.tar.xz" -C "$HELIUM_TMP/extracted"
+        HELIUM_SRC_DIR="$(find "$HELIUM_TMP/extracted" -maxdepth 1 -mindepth 1 -type d | head -n1)"
+
+        rm -rf "$HELIUM_OPT_DIR"
+        mkdir -p "$HELIUM_OPT_DIR"
+        cp -r "$HELIUM_SRC_DIR"/. "$HELIUM_OPT_DIR"/
+
+        HELIUM_BIN="$(find "$HELIUM_OPT_DIR" -maxdepth 1 -type f -iname 'helium*' ! -name '*.so*' | head -n1)"
+        [[ -z "$HELIUM_BIN" ]] && HELIUM_BIN="$HELIUM_OPT_DIR/chrome"
+        chmod +x "$HELIUM_BIN"
+
+        tee /usr/local/bin/helium-browser >/dev/null <<EOF2
+#!/usr/bin/env bash
+exec "$HELIUM_BIN" --ozone-platform=wayland --enable-features=WaylandWindowDecorations "\$@"
+EOF2
+        chmod +x /usr/local/bin/helium-browser
+
+        HELIUM_ICON="$(find "$HELIUM_OPT_DIR" -iname 'product_logo*256*.png' -o -iname 'icon*.png' | head -n1)"
+        cat <<EOF3 >/usr/share/applications/helium-browser.desktop
+[Desktop Entry]
+Name=Helium
+Comment=Navegador basado en Chromium sin Google (Helium)
+Exec=/usr/local/bin/helium-browser %U
+Terminal=false
+Type=Application
+Icon=${HELIUM_ICON:-web-browser}
+Categories=Network;WebBrowser;
+EOF3
+
+        gum style --foreground 82 "✅ Helium instalado (comando: helium-browser)"
+      else
+        gum style --foreground 196 "❌ La firma GPG del tarball de Helium no es válida. Se omite su instalación por seguridad."
+      fi
+    else
+      gum style --foreground 196 "⚠️ No se encontró archivo .asc para verificar la firma. Se omite Helium por seguridad."
+    fi
+  fi
+  rm -rf "$HELIUM_TMP"
   fi
 fi
 
@@ -1749,10 +2237,6 @@ EOF
       gum style --foreground 244 "  ⏭️  kde → omitido (no elegiste instalar KDE)"
       continue
     fi
-    if [ "$folder" = "noctalia" ] && ! $INSTALL_NOCTALIA; then
-      gum style --foreground 244 "  ⏭️  noctalia → omitido (Noctalia no se instaló)"
-      continue
-    fi
 
     if [ "$folder" = "hypr" ] && ! $RESTORE_HYPR_CONFIG; then
       gum style --foreground 244 "  ⏭️  hypr → omitido (se pidió Hyprland limpio)"
@@ -1762,21 +2246,17 @@ EOF
       gum style --foreground 244 "  ⏭️  niri → omitido (se pidió Niri limpio)"
       continue
     fi
-    if [ "$folder" = "noctalia" ] && ! $RESTORE_NOCTALIA_CONFIG; then
-      gum style --foreground 244 "  ⏭️  noctalia → omitido (se pidió Noctalia limpio)"
-      continue
-    fi
     if [ "$folder" = "kde" ] && ! $RESTORE_KDE_CONFIG; then
       gum style --foreground 244 "  ⏭️  kde → omitido (se pidió KDE limpio)"
       continue
     fi
 
-    # Cualquier otra carpeta de app (no hypr/niri/kde/noctalia, que ya
-    # se manejaron arriba): respeta la elección limpio/restaurar hecha
+    # Cualquier otra carpeta de app (no hypr/niri/kde, que ya se
+    # manejaron arriba): respeta la elección limpio/restaurar hecha
     # en la sección 0.8 para esa app puntual, si se preguntó.
     # Excepción: carpetas de theming puro (qt6ct, gtk-3.0, gtk-4.0) se
     # restauran SIEMPRE, en los dos modos — no tienen nada personal.
-    if [ "$folder" != "hypr" ] && [ "$folder" != "niri" ] && [ "$folder" != "kde" ] && [ "$folder" != "noctalia" ] \
+    if [ "$folder" != "hypr" ] && [ "$folder" != "niri" ] && [ "$folder" != "kde" ] \
       && [ "$folder" != "qt6ct" ] && [ "$folder" != "gtk-3.0" ] && [ "$folder" != "gtk-4.0" ]; then
       if [[ "${APP_RESTORE_CHOICE[$folder]:-}" == "clean" ]]; then
         gum style --foreground 244 "  ⏭️  $folder → omitido (se pidió instalación limpia para esa app)"
@@ -1933,6 +2413,49 @@ if $INSTALL_NIRI && ! $RESTORE_NIRI_CONFIG; then
   chown -R "$REAL_USER:$REAL_USER" "$NIRI_DEST_DIR"
 elif [[ -n "$NIRI_KDL_SRC" ]]; then
   gum style --foreground 244 "⚠️  Se pasó --niri-kdl pero se restauró respaldo/niri — se omite para no pisarlo."
+fi
+
+# -----------------------------
+# 10.1.1. base-bar: enganchar autostart + binds en config.kdl final
+# -----------------------------
+# Sin importar de dónde vino el config.kdl final (limpio, --niri-kdl o
+# respaldo/niri), si base-bar se instaló, garantizamos que quede
+# lanzada al iniciar sesión y que Mod+B abra Helium. Es idempotente:
+# si ya están esas líneas, no las duplica.
+if $INSTALL_BASEBAR; then
+  NIRI_CONF_FOR_BASEBAR="$USER_HOME/.config/niri/config.kdl"
+  if [ -f "$NIRI_CONF_FOR_BASEBAR" ]; then
+    if ! grep -q 'qs.*base-bar' "$NIRI_CONF_FOR_BASEBAR"; then
+      # Busca el bloque spawn-at-startup existente y agrega ahí, o al
+      # final del archivo si no hay ninguno.
+      if grep -q 'spawn-at-startup' "$NIRI_CONF_FOR_BASEBAR"; then
+        sed -i '0,/spawn-at-startup/s//spawn-at-startup "qs" "-c" "base-bar"\nspawn-at-startup/' "$NIRI_CONF_FOR_BASEBAR"
+      else
+        printf '\nspawn-at-startup "qs" "-c" "base-bar"\n' >>"$NIRI_CONF_FOR_BASEBAR"
+      fi
+      gum style --foreground 82 "✅ base-bar: autostart agregado a $NIRI_CONF_FOR_BASEBAR"
+    fi
+
+    if ! grep -q 'helium-browser' "$NIRI_CONF_FOR_BASEBAR"; then
+      if grep -q '^binds {' "$NIRI_CONF_FOR_BASEBAR"; then
+        sed -i '/^binds {/a\    Mod+B { spawn "helium-browser"; }' "$NIRI_CONF_FOR_BASEBAR"
+      else
+        printf '\nbinds {\n    Mod+B { spawn "helium-browser"; }\n}\n' >>"$NIRI_CONF_FOR_BASEBAR"
+      fi
+      gum style --foreground 82 "✅ base-bar: bind Mod+B (Helium) agregado a $NIRI_CONF_FOR_BASEBAR"
+    fi
+
+    if ! grep -q 'hyprquickpaper' "$NIRI_CONF_FOR_BASEBAR"; then
+      if grep -q '^binds {' "$NIRI_CONF_FOR_BASEBAR"; then
+        sed -i '/^binds {/a\    Mod+W { spawn "quickshell" "-c" "hyprquickpaper"; }' "$NIRI_CONF_FOR_BASEBAR"
+      else
+        printf '\nbinds {\n    Mod+W { spawn "quickshell" "-c" "hyprquickpaper"; }\n}\n' >>"$NIRI_CONF_FOR_BASEBAR"
+      fi
+      gum style --foreground 82 "✅ base-bar: bind Mod+W (HyprQuickPaper) agregado a $NIRI_CONF_FOR_BASEBAR"
+    fi
+
+    chown "$REAL_USER:$REAL_USER" "$NIRI_CONF_FOR_BASEBAR"
+  fi
 fi
 
 # -----------------------------
