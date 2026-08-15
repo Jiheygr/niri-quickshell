@@ -1339,7 +1339,7 @@ if $INSTALL_BASEBAR; then
   section "🎨 Configurando base-bar (Quickshell)..."
 
   BASEBAR_CONFIG_DIR="$USER_HOME/.config/quickshell/base-bar"
-  BASEBAR_COMMON_DIR="$USER_HOME/.config/quickshell/Common"
+  BASEBAR_COMMON_DIR="$BASEBAR_CONFIG_DIR/Common"
   MATUGEN_DIR="$USER_HOME/.config/matugen"
   MATUGEN_TEMPLATES_DIR="$MATUGEN_DIR/templates"
   QS_STATE_DIR="$USER_HOME/.local/state/quickshell/generated"
@@ -1397,13 +1397,13 @@ Singleton {
     id: root
 
     property color background: "#1e1e2e"
-    property color onBackground: "#cdd6f4"
+    property color textOnBackground: "#cdd6f4"
     property color surface: "#313244"
     property color surfaceVariant: "#45475a"
     property color primary: "#89b4fa"
-    property color onPrimary: "#1e1e2e"
+    property color textOnPrimary: "#1e1e2e"
     property color secondary: "#f5c2e7"
-    property color onSecondary: "#1e1e2e"
+    property color textOnSecondary: "#1e1e2e"
     property color error: "#f38ba8"
     property color outline: "#6c7086"
 
@@ -1411,21 +1411,25 @@ Singleton {
         id: colorsFile
         path: Quickshell.env("HOME") + "/.local/state/quickshell/generated/colors.json"
         watchChanges: true
-
-        onLoaded: parseColors()
         onFileChanged: reload()
+
+        // text() no es una property real, pero se puede "atar" a una
+        // property normal y se re-evalúa sola gracias a su notify
+        // signal interno (patrón documentado por Quickshell).
+        property string rawJson: text()
+        onRawJsonChanged: parseColors()
 
         function parseColors() {
             try {
-                var c = JSON.parse(colorsFile.text())
+                var c = JSON.parse(rawJson)
                 if (c.background) root.background = c.background
-                if (c.on_background) root.onBackground = c.on_background
+                if (c.on_background) root.textOnBackground = c.on_background
                 if (c.surface) root.surface = c.surface
                 if (c.surface_variant) root.surfaceVariant = c.surface_variant
                 if (c.primary) root.primary = c.primary
-                if (c.on_primary) root.onPrimary = c.on_primary
+                if (c.on_primary) root.textOnPrimary = c.on_primary
                 if (c.secondary) root.secondary = c.secondary
-                if (c.on_secondary) root.onSecondary = c.on_secondary
+                if (c.on_secondary) root.textOnSecondary = c.on_secondary
                 if (c.error) root.error = c.error
                 if (c.outline) root.outline = c.outline
             } catch (e) {
@@ -1534,7 +1538,11 @@ ShellRoot {
 
     Process {
         id: launcherProc
-        command: ["nwg-drawer", "-r"]
+        // toggle-drawer.sh se autogestiona: si no hay instancia
+        // residente de nwg-drawer la arranca oculta, si ya existe le
+        // manda la señal de toggle. No requiere spawn-at-startup en
+        // config.kdl, ni relanzar el programa en cada clic.
+        command: ["__USER_HOME__/.local/bin/toggle-drawer.sh"]
     }
 
     Process {
@@ -1555,15 +1563,24 @@ ShellRoot {
             id: chipText
             anchors.centerIn: parent
             text: label
-            color: Colors.onBackground
+            color: Colors.textOnBackground
             font.pixelSize: 11
         }
     }
 
     PanelWindow {
         anchors { top: true; left: true; right: true }
-        height: 34
+        implicitHeight: 34
         color: Colors.background
+
+        Item {
+            id: clockTimer
+            property var now: new Date()
+            Timer {
+                interval: 1000; running: true; repeat: true
+                onTriggered: clockTimer.now = new Date()
+            }
+        }
 
         RowLayout {
             anchors.fill: parent
@@ -1577,7 +1594,7 @@ ShellRoot {
                 Rectangle {
                     width: 26; height: 22; radius: 6
                     color: launcherArea.containsMouse ? Colors.surface : "transparent"
-                    Text { anchors.centerIn: parent; text: "󰀻"; color: Colors.onBackground; font.pixelSize: 14 }
+                    Text { anchors.centerIn: parent; text: "󰀻"; color: Colors.textOnBackground; font.pixelSize: 14 }
                     MouseArea {
                         id: launcherArea
                         anchors.fill: parent
@@ -1594,7 +1611,7 @@ ShellRoot {
                         Text {
                             anchors.centerIn: parent
                             text: modelData.idx !== undefined ? modelData.idx : ""
-                            color: modelData.is_focused ? Colors.onPrimary : Colors.onBackground
+                            color: modelData.is_focused ? Colors.textOnPrimary : Colors.textOnBackground
                             font.pixelSize: 11
                         }
                         MouseArea { anchors.fill: parent; onClicked: switchProc.runWith(modelData.idx) }
@@ -1613,7 +1630,7 @@ ShellRoot {
                 spacing: 10
                 Text {
                     text: Qt.formatDateTime(clockTimer.now, "hh:mm:ss")
-                    color: Colors.onBackground
+                    color: Colors.textOnBackground
                     font.bold: true
                     font.pixelSize: 13
                 }
@@ -1621,15 +1638,6 @@ ShellRoot {
                     text: Qt.formatDateTime(clockTimer.now, "ddd d MMM")
                     color: Colors.outline
                     font.pixelSize: 12
-                }
-            }
-
-            QtObject {
-                id: clockTimer
-                property var now: new Date()
-                Timer {
-                    interval: 1000; running: true; repeat: true
-                    onTriggered: clockTimer.now = new Date()
                 }
             }
 
@@ -1723,7 +1731,41 @@ ShellRoot {
 }
 EOF
 
+  # Ruta absoluta hardcodeada -- no depender de Quickshell.env("HOME") en
+  # runtime, porque cuando qs arranca vía spawn-at-startup de Niri (en
+  # vez de a mano desde una terminal) el entorno puede no traer HOME
+  # seteado igual que en una sesión de shell interactiva, y el botón del
+  # lanzador queda roto en silencio después de reiniciar sesión.
+  sed -i "s#__USER_HOME__#$USER_HOME#g" "$BASEBAR_CONFIG_DIR/shell.qml"
+
   chown -R "$REAL_USER:$REAL_USER" "$USER_HOME/.config/quickshell" "$MATUGEN_DIR" "$USER_HOME/.local/state/quickshell"
+  # --- toggle-drawer.sh: gestiona nwg-drawer solo, sin tocar config.kdl ---
+  # Si no hay una instancia residente corriendo, la lanza (-r, en 2do
+  # plano, oculta). Si ya está corriendo, le manda la señal de toggle
+  # (SIGUSR1) para mostrarla/ocultarla. Así el botón de la barra y
+  # cualquier bind solo necesitan llamar a este script, siempre.
+  sudo -u "$REAL_USER" mkdir -p "$USER_HOME/.local/bin"
+  sudo -u "$REAL_USER" tee "$USER_HOME/.local/bin/toggle-drawer.sh" >/dev/null <<'EOF'
+#!/usr/bin/env bash
+# flock evita que dos clics casi simultáneos (o un doble-disparo del
+# MouseArea) corran este script al mismo tiempo -- sin esto, dos
+# ejecuciones en paralelo pueden ver "nwg-drawer no está corriendo"
+# ambas a la vez y lanzar dos instancias residentes, rompiendo el
+# toggle (pkill -USR1 le pega a las dos y queda en estado inconsistente).
+exec 200>/tmp/toggle-drawer.lock
+flock -n 200 || exit 0
+
+if pgrep -x nwg-drawer >/dev/null; then
+    pkill -USR1 nwg-drawer
+else
+    nwg-drawer -r &
+    disown
+fi
+EOF
+  chmod +x "$USER_HOME/.local/bin/toggle-drawer.sh"
+  chown "$REAL_USER:$REAL_USER" "$USER_HOME/.local/bin/toggle-drawer.sh"
+  gum style --foreground 82 "✅ toggle-drawer.sh creado en $USER_HOME/.local/bin (lanza o esconde nwg-drawer solo)"
+
   gum style --foreground 82 "✅ base-bar configurada en $BASEBAR_CONFIG_DIR (lanzar con: qs -c base-bar)"
 
   # --- HyprQuickPaper: selector visual de wallpapers (Quickshell) ---
@@ -2426,14 +2468,17 @@ if $INSTALL_BASEBAR; then
   NIRI_CONF_FOR_BASEBAR="$USER_HOME/.config/niri/config.kdl"
   if [ -f "$NIRI_CONF_FOR_BASEBAR" ]; then
     if ! grep -q 'qs.*base-bar' "$NIRI_CONF_FOR_BASEBAR"; then
-      # Busca el bloque spawn-at-startup existente y agrega ahí, o al
-      # final del archivo si no hay ninguno.
+      # Se usa spawn-sh-at-startup con un pequeño delay (en vez de
+      # spawn-at-startup directo) porque lanzar qs demasiado temprano,
+      # antes de que Niri termine de inicializar layer-shell/input,
+      # puede dejar la barra visible pero sin recibir clics -- carrera
+      # de arranque típica en Wayland. 2s alcanza de sobra.
       if grep -q 'spawn-at-startup' "$NIRI_CONF_FOR_BASEBAR"; then
-        sed -i '0,/spawn-at-startup/s//spawn-at-startup "qs" "-c" "base-bar"\nspawn-at-startup/' "$NIRI_CONF_FOR_BASEBAR"
+        sed -i '0,/spawn-at-startup/s//spawn-sh-at-startup "sleep 2 \&\& qs -c base-bar"\nspawn-at-startup/' "$NIRI_CONF_FOR_BASEBAR"
       else
-        printf '\nspawn-at-startup "qs" "-c" "base-bar"\n' >>"$NIRI_CONF_FOR_BASEBAR"
+        printf '\nspawn-sh-at-startup "sleep 2 && qs -c base-bar"\n' >>"$NIRI_CONF_FOR_BASEBAR"
       fi
-      gum style --foreground 82 "✅ base-bar: autostart agregado a $NIRI_CONF_FOR_BASEBAR"
+      gum style --foreground 82 "✅ base-bar: autostart agregado a $NIRI_CONF_FOR_BASEBAR (con delay de 2s)"
     fi
 
     if ! grep -q 'helium-browser' "$NIRI_CONF_FOR_BASEBAR"; then
