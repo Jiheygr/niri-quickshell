@@ -1,0 +1,478 @@
+#!/bin/bash
+
+# ══════════════════════════════════════════════════════════════════
+#  ANIME MODULE — modos internos llamados por fzf
+# ══════════════════════════════════════════════════════════════════
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/editconfig"
+ANIME_CACHE="${CACHE_ROOT}/anime_temporada_$(date +%Y%m).json"
+COVER_DIR="${CACHE_ROOT}/portadas"
+SYNOPSIS_DIR="${CACHE_ROOT}/sinopsis"
+LANG_FILE="${CACHE_ROOT}/idioma"
+API_BASE="https://graphql.anilist.co"
+mkdir -p "$COVER_DIR" "$SYNOPSIS_DIR"
+
+# Idioma de la info del anime: "es" (traducido) o "en" (original de AniList)
+_anime_get_lang() {
+    [[ -f "$LANG_FILE" ]] && cat "$LANG_FILE" || echo "es"
+}
+
+# Descarga (con caché en disco, persistente) la portada de un anime y la
+# imprime como arte ANSI (medios bloques de color) con chafa. Se evita
+# a propósito cualquier protocolo gráfico nativo (kitty/sixel): dentro del
+# panel de preview de fzf, que se redibuja constantemente, esos protocolos
+# terminan flotando encima del texto y tapándolo.
+_anime_show_cover() {
+    local ani_id="$1" cover_url="$2"
+    [[ -z "$cover_url" || "$cover_url" == "null" ]] && return
+    command -v chafa &>/dev/null || return
+
+    local img_file="${COVER_DIR}/${ani_id}.jpg"
+    if [[ ! -s "$img_file" ]]; then
+        curl -sf --max-time 10 -o "$img_file" "$cover_url" || rm -f "$img_file"
+    fi
+    [[ ! -s "$img_file" ]] && return
+
+    chafa --format symbols --symbols=half --colors=full --color-space=din99d \
+          --work=9 --dither=diffusion --size=44x24 "$img_file" 2>/dev/null
+    echo ""
+}
+
+# Traduce (en → es) un texto usando la API pública de MyMemory, cacheando
+# el resultado en disco para no volver a pedirlo. La API gratuita limita
+# cada consulta a 500 caracteres, así que si el texto es más largo se
+# trocea en fragmentos (respetando espacios) y se traduce por partes.
+# Si algo falla, devuelve el texto original sin traducir.
+_anime_translate_es() {
+    local ani_id="$1" text="$2"
+    local cache_file="${SYNOPSIS_DIR}/${ani_id}.es"
+
+    if [[ -s "$cache_file" ]] && ! grep -q "QUERY LENGTH LIMIT" "$cache_file"; then
+        cat "$cache_file"
+        return
+    fi
+
+    [[ -z "$text" ]] && { echo ""; return; }
+
+    local chunk encoded piece result=""
+    while IFS= read -r chunk; do
+        [[ -z "$chunk" ]] && continue
+        encoded=$(jq -rn --arg t "$chunk" '$t|@uri')
+        piece=$(curl -sf --max-time 10 \
+            "https://api.mymemory.translated.net/get?q=${encoded}&langpair=en|es" \
+            | jq -r '.responseData.translatedText // empty' 2>/dev/null)
+        if [[ -z "$piece" || "$piece" == *"QUERY LENGTH LIMIT"* ]]; then
+            piece="$chunk"
+        fi
+        result+="${piece} "
+    done < <(fold -s -w 480 <<< "$text")
+
+    result="${result% }"
+    if [[ -n "$result" ]]; then
+        printf '%s' "$result" > "$cache_file"
+        printf '%s' "$result"
+    else
+        printf '%s' "$text"
+    fi
+}
+
+# ── Modo PREVIEW ───────────────────────────────────────────────────
+if [[ "${1:-}" == "--anime-preview" ]]; then
+    ani_id="$2"
+    data=$(jq -r ".[] | select(.id == $ani_id)" "$ANIME_CACHE" 2>/dev/null)
+    [[ -z "$data" ]] && echo "Sin datos para este anime." && exit 0
+
+    title=$(    echo "$data" | jq -r '.title.romaji // "?"')
+    title_en=$( echo "$data" | jq -r '.title.english // empty')
+    title_jp=$( echo "$data" | jq -r '.title.native // empty')
+    score=$(    echo "$data" | jq -r 'if .averageScore then (.averageScore / 10 | tostring) else "N/D" end')
+    rank=$(     echo "$data" | jq -r '.rankings[0].rank // "?"')
+    episodes=$( echo "$data" | jq -r '.episodes // "?"')
+    status=$(   echo "$data" | jq -r '.status // "?"')
+    source=$(   echo "$data" | jq -r '.source // "?"')
+    season=$(   echo "$data" | jq -r '.season // "" | ascii_upcase')
+    year=$(     echo "$data" | jq -r '.seasonYear // ""')
+    duration=$( echo "$data" | jq -r 'if .duration then "\(.duration) min" else "?" end')
+    synopsis_raw=$( echo "$data" | jq -r '.description // "Sin sinopsis disponible."' | sed 's/<[^>]*>//g')
+    genres=$(   echo "$data" | jq -r '.genres | join(" · ")')
+    studios=$(  echo "$data" | jq -r '[.studios.nodes[].name] | join(", ")')
+    cover_url=$(echo "$data" | jq -r '.coverImage.large // empty')
+
+    idioma=$(_anime_get_lang)
+    if [[ "$idioma" == "es" ]]; then
+        synopsis=$(_anime_translate_es "$ani_id" "$synopsis_raw")
+    else
+        synopsis="$synopsis_raw"
+    fi
+
+    _anime_show_cover "$ani_id" "$cover_url"
+
+    # Horario: AniList da airingAt en Unix timestamp (UTC)
+    next_ep=$(  echo "$data" | jq -r '.nextAiringEpisode.episode // ""')
+    airing_at=$(echo "$data" | jq -r '.nextAiringEpisode.airingAt // ""')
+
+    if [[ -n "$airing_at" && "$airing_at" != "null" ]]; then
+        # Convertir timestamp UTC a hora local del sistema
+        local_time=$(date -d "@${airing_at}" +"%a %d/%m %H:%M %Z" 2>/dev/null \
+                     || date -r "${airing_at}" +"%a %d/%m %H:%M %Z" 2>/dev/null \
+                     || echo "?")
+        broadcast_str="Ep ${next_ep} — ${local_time}"
+    else
+        broadcast_str="Horario no disponible"
+    fi
+
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    printf "📺  %s\n" "$title"
+    [[ -n "${title_en:-}" ]] && printf "    %s\n" "$title_en"
+    [[ -n "${title_jp:-}" ]] && printf "    %s\n" "$title_jp"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    printf "⭐ Score: %s/10   🏆 Rank #%s\n"         "$score" "$rank"
+    printf "📅 %s %s  │  🎬 %s eps  │  ⏱ %s\n"    "$season" "$year" "$episodes" "$duration"
+    printf "🕐 Próximo: %s\n"                         "$broadcast_str"
+    printf "📖 Fuente: %s\n"                          "$source"
+    echo ""
+    [[ -n "$studios" ]] && printf "🏭 Estudio: %s\n" "$studios"
+    [[ -n "$genres" ]]  && printf "🏷️  Géneros: %s\n" "$genres"
+    echo ""
+    printf "📝 Sinopsis (%s):\n" "$([[ "$idioma" == "es" ]] && echo "ES" || echo "EN")"
+    echo "$synopsis" | fold -s -w 60 | sed 's/^/  /'
+    echo ""
+    printf "  🔗 https://anilist.co/anime/%s\n" "$ani_id"
+    exit 0
+fi
+
+# ── Funciones de caché y carga ─────────────────────────────────────
+_anime_cache_age() {
+    [[ ! -f "$ANIME_CACHE" ]] && echo 9999999 && return
+    if stat -f %m "$ANIME_CACHE" &>/dev/null 2>&1; then
+        echo $(( $(date +%s) - $(stat -f %m "$ANIME_CACHE") ))
+    else
+        echo $(( $(date +%s) - $(stat -c %Y "$ANIME_CACHE") ))
+    fi
+}
+
+_anime_fetch() {
+    local force="${1:-false}"
+    if [[ "$force" != "true" ]] && [[ $(_anime_cache_age) -lt 3600 ]]; then
+        return
+    fi
+    echo "⏳ Cargando anime de temporada actual desde AniList..." >&2
+
+    # Determinar temporada y año actuales
+    local month year season
+    month=$(date +%-m)
+    year=$(date +%Y)
+    case "$month" in
+        1|2|3)   season="WINTER" ;;
+        4|5|6)   season="SPRING" ;;
+        7|8|9)   season="SUMMER" ;;
+        10|11|12) season="FALL" ;;
+    esac
+
+    local all_data="[]" page=1 has_next=true
+
+    while [[ "$has_next" == "true" ]]; do
+        local query response page_data
+        query=$(cat <<EOF
+{
+  "query": "query(\$page:Int,\$season:MediaSeason,\$year:Int){Page(page:\$page,perPage:50){pageInfo{hasNextPage}media(season:\$season,seasonYear:\$year,type:ANIME,sort:POPULARITY_DESC){id title{romaji english native}coverImage{large}averageScore rankings{rank type allTime season}episodes status source season seasonYear duration description genres studios(isMain:true){nodes{name}}nextAiringEpisode{episode airingAt}}}}",
+  "variables": {"page": $page, "season": "$season", "year": $year}
+}
+EOF
+)
+        if ! response=$(curl -sf --max-time 20 -X POST "$API_BASE" \
+            -H "Content-Type: application/json" \
+            -d "$query"); then
+            echo "❌ Error al conectar con AniList API" >&2
+            [[ -f "$ANIME_CACHE" ]] && echo "⚠️  Usando caché anterior..." >&2 && return
+            exit 1
+        fi
+
+        page_data=$(echo "$response" | jq '.data.Page.media')
+        all_data=$(printf '%s\n%s' "$all_data" "$page_data" | jq -s 'add // []')
+        has_next=$(echo "$response" | jq -r '.data.Page.pageInfo.hasNextPage')
+
+        printf "\r  Página %d — %d anime..." "$page" "$(echo "$all_data" | jq 'length')" >&2
+        [[ "$has_next" != "true" ]] && break
+        page=$((page + 1))
+        sleep 0.5
+    done
+
+    echo "" >&2
+    echo "$all_data" > "$ANIME_CACHE"
+    echo "✅ $(jq 'length' "$ANIME_CACHE") anime cargados ($season $year)" >&2
+}
+
+# ── Construcción de lista (con filtro opcional) ────────────────────
+# $1 = tipo de filtro: all | day | time
+# $2 = valor del filtro
+_anime_build_list() {
+    local filter_type="${1:-all}"
+    local filter_val="${2:-}"
+
+    # Extraer datos como TSV: id, score, title, studio, airingAt (unix ts)
+    local jq_select
+    case "$filter_type" in
+        day)
+            # Filtrar por día local: convertimos airingAt a día de semana con date
+            # Hacemos el filtro en bash tras extraer todos los datos
+            jq_select=".[]"
+            ;;
+        time)
+            jq_select=".[]"
+            ;;
+        *)
+            jq_select=".[]"
+            ;;
+    esac
+
+    # Generar TSV base: id, score, title, studio, airingAt
+    local tsv
+    tsv=$(jq -r "${jq_select} | \
+        \"\(.id)\t\(.averageScore // 0)\t\(.title.romaji)\t\(.studios.nodes[0].name // \"?\")\t\(.nextAiringEpisode.airingAt // \"\")\"" \
+        "$ANIME_CACHE")
+
+    # Añadir columna de hora local y filtrar si aplica
+    while IFS=$'\t' read -r ani_id score title studio airing_at; do
+        local local_day local_hour local_time_str
+
+        if [[ -n "$airing_at" ]]; then
+            local_day=$(date -d "@${airing_at}" +"%A" 2>/dev/null \
+                        || date -r "${airing_at}" +"%A" 2>/dev/null || echo "")
+            local_hour=$(date -d "@${airing_at}" +"%H" 2>/dev/null \
+                         || date -r "${airing_at}" +"%H" 2>/dev/null || echo "")
+            local_time_str=$(date -d "@${airing_at}" +"%a %H:%M" 2>/dev/null \
+                             || date -r "${airing_at}" +"%a %H:%M" 2>/dev/null || echo "--:--")
+        else
+            local_day="" local_hour="" local_time_str="---"
+        fi
+
+        # Aplicar filtros
+        case "$filter_type" in
+            day)
+                [[ "$local_day" != "$filter_val" ]] && continue
+                ;;
+            time)
+                case "$filter_val" in
+                    "🌙 Madrugada (00-05)") [[ -z "$local_hour" || "$local_hour" -ge 6 ]]  && continue ;;
+                    "🌅 Mañana (06-11)")    [[ -z "$local_hour" || "$local_hour" -lt 6 || "$local_hour" -ge 12 ]] && continue ;;
+                    "☀️  Tarde (12-17)")     [[ -z "$local_hour" || "$local_hour" -lt 12 || "$local_hour" -ge 18 ]] && continue ;;
+                    "🌆 Noche (18-23)")     [[ -z "$local_hour" || "$local_hour" -lt 18 ]] && continue ;;
+                    *)                      [[ -n "$local_hour" ]] && continue ;;
+                esac
+                ;;
+        esac
+
+        printf "%s\t%s\t%s\t%s\t%s\n" "$ani_id" "$score" "$title" "$studio" "$local_time_str"
+    done <<< "$tsv" | \
+    sort -t$'\t' -k2 -rn | \
+    awk -F'\t' '{
+        score    = ($2 == "0" || $2 == "") ? " ---" : sprintf("%s/10", $2)
+        schedule = ($5 == "" || $5 == "---") ? "---" : $5
+        printf "%-7s  ⭐ %-7s  🕐 %-12s  %-36s  %s\n", \
+            $1, score, schedule, substr($3,1,36), substr($4,1,18)
+    }'
+}
+
+_anime_open() {
+    local url="https://anilist.co/anime/$1"
+    if command -v xdg-open &>/dev/null; then xdg-open "$url" &>/dev/null &
+    elif command -v open &>/dev/null;    then open "$url"
+    else echo "🔗 $url"; fi
+}
+
+# ── Modos internos ─────────────────────────────────────────────────
+if [[ "${1:-}" == "--anime-open" ]]; then
+    _anime_open "$2"; exit 0
+fi
+
+if [[ "${1:-}" == "--anime-list" ]]; then
+    # $2=filter_type  $3=filter_val
+    _anime_build_list "${2:-all}" "${3:-}"; exit 0
+fi
+
+if [[ "${1:-}" == "--anime-rebuild" ]]; then
+    # $2=filter_type  $3=filter_val
+    _anime_fetch "true"
+    _anime_build_list "${2:-all}" "${3:-}"; exit 0
+fi
+
+# ── Lanzar fzf con lista (filtrada o no) ──────────────────────────
+_anime_show_fzf() {
+    local filter_type="${1:-all}"
+    local filter_val="${2:-}"
+    local label="${3:-TODOS}"
+
+    local total age_min idioma_hdr
+    total=$(jq 'length' "$ANIME_CACHE")
+    age_min=$(( $(_anime_cache_age) / 60 ))
+    idioma_hdr=$([[ "$(_anime_get_lang)" == "es" ]] && echo "ES" || echo "EN")
+
+    export ANIME_CACHE SELF
+
+    # Escapar filter_val para usarlo dentro del bind de reload
+    local esc_val
+    esc_val=$(printf '%s' "$filter_val" | sed "s/'/'\\\\''/g")
+
+    _anime_build_list "$filter_type" "$filter_val" | fzf \
+        --ansi \
+        --no-sort \
+        --prompt="  🔍  " \
+        --header="$(printf '%s\n%s\n%-7s  %-7s  %-14s  %-36s  %s' \
+            "  📺 ANIME — $total series  |  filtro: $label  |  idioma: $idioma_hdr  |  caché: hace ${age_min}min" \
+            "  Enter: abrir AniList · Ctrl-R: recargar · Ctrl-F: cambiar filtro · Ctrl-C: volver" \
+            "ID" "SCORE" "PRÓXIMO (local)" "TÍTULO" "ESTUDIO")" \
+        --preview="\"$SELF\" --anime-preview {1}" \
+        --preview-window="right:56%:wrap" \
+        --color="hl:cyan,hl+:bright-cyan,prompt:bold,header:italic:dim,pointer:cyan" \
+        --bind "enter:execute-silent(\"$SELF\" --anime-open {1})" \
+        --bind "ctrl-r:reload(\"$SELF\" --anime-rebuild '$filter_type' '$esc_val')" \
+        --bind "ctrl-f:abort" \
+        || true
+}
+
+# ── Submenú de filtros ─────────────────────────────────────────────
+_anime_submenu() {
+    while true; do
+        # Menú principal de filtros
+        local filter_mode
+        filter_mode=$(printf '%s\n' \
+            "⬅  Volver al menú principal" \
+            "📺  Ver todo" \
+            "📅  Por día de la semana" \
+            "🕐  Por franja horaria (local)" \
+            | fzf \
+                --no-sort \
+                --prompt="  🎌 Filtrar anime › " \
+                --header=$'  Elige cómo filtrar el anime en emisión\n' \
+                --color="prompt:bold,pointer:cyan,header:italic:dim" \
+                --height=40% \
+            ) || return 0
+
+        case "$filter_mode" in
+
+            *"Volver"*)
+                return 0
+                ;;
+
+            *"Ver todo"*)
+                _anime_show_fzf "all" "" "TODOS"
+                ;;
+
+            *"día"*)
+                # Extraer días únicos del caché, ordenados semana
+                # Obtener días locales únicos a partir de los timestamps del caché
+                local day
+                day=$(jq -r '.[].nextAiringEpisode.airingAt // empty' "$ANIME_CACHE" \
+                    | while read -r ts; do
+                        date -d "@${ts}" +"%A" 2>/dev/null || date -r "${ts}" +"%A" 2>/dev/null
+                      done | sort -u \
+                    | awk '
+                        /Monday/    { print "1\t" $0 }
+                        /Tuesday/   { print "2\t" $0 }
+                        /Wednesday/ { print "3\t" $0 }
+                        /Thursday/  { print "4\t" $0 }
+                        /Friday/    { print "5\t" $0 }
+                        /Saturday/  { print "6\t" $0 }
+                        /Sunday/    { print "7\t" $0 }
+                    ' | sort -t$'\t' -k1 -n | cut -f2 \
+                    | { printf '⬅  Volver\n'; cat; } \
+                    | fzf \
+                        --no-sort \
+                        --prompt="  📅 Día (hora local) › " \
+                        --header=$'  Días de emisión en hora local\n' \
+                        --preview="\"$SELF\" --anime-list day {} | wc -l | xargs -I{} echo '{} anime este día'" \
+                        --color="prompt:bold,pointer:cyan,header:italic:dim" \
+                        --height=50% \
+                    ) || continue
+                [[ -z "$day" || "$day" == "⬅  Volver" ]] && continue
+                _anime_show_fzf "day" "$day" "📅 $day"
+                ;;
+
+            *"franja"*)
+                local slot
+                slot=$(printf '%s\n' \
+                    "⬅  Volver" \
+                    "🌙 Madrugada (00-05)" \
+                    "🌅 Mañana (06-11)" \
+                    "☀️  Tarde (12-17)" \
+                    "🌆 Noche (18-23)" \
+                    "❓ Sin horario definido" \
+                    | fzf \
+                        --no-sort \
+                        --prompt="  🕐 Franja horaria (local) › " \
+                        --header=$'  Selecciona una franja del día (hora de tu PC)\n' \
+                        --preview="\"$SELF\" --anime-list time {} | wc -l | xargs -I{} echo '{} anime en esta franja'" \
+                        --color="prompt:bold,pointer:cyan,header:italic:dim" \
+                        --height=40% \
+                    ) || continue
+                [[ -z "$slot" || "$slot" == "⬅  Volver" ]] && continue
+                _anime_show_fzf "time" "$slot" "🕐 $slot (local)"
+                ;;
+        esac
+
+        # Si el usuario presionó Ctrl-F dentro del fzf de lista, vuelve al submenú
+        # (ctrl-f hace abort, que devuelve el control aquí y el while continúa)
+    done
+}
+
+# ══════════════════════════════════════════════════════════════════
+#  SCRIPT PRINCIPAL
+# ══════════════════════════════════════════════════════════════════
+
+while true; do
+    tema_actual=$(grep -oP '(?<=^ZSH_THEME=")[^"]*' ~/.zshrc 2>/dev/null || echo "?")
+    idioma_actual=$(_anime_get_lang)
+    idioma_label=$([[ "$idioma_actual" == "es" ]] && echo "Español" || echo "English")
+
+    option=$(printf '%s\n' \
+        "📝 editar .zshrc" \
+        "🎨 change zsh theme  (actual: ${tema_actual})" \
+        "🌐 idioma anime  (actual: ${idioma_label})" \
+        "🔄 update noctalia" \
+        "📺 anime en emisión" \
+        "🚪 salir" \
+        | fzf --prompt="What do you want to do? " --header="Esc / Ctrl-C: salir")
+
+    [[ -z "$option" ]] && break
+
+    case "$option" in
+        *"editar .zshrc"*)
+            nvim "$HOME/.zshrc"
+            ;;
+        *"change zsh theme"*)
+            tema=$(printf '%s\n' "⬅  Volver" "$(ls ~/.oh-my-zsh/themes/ | sed 's/\.zsh-theme//')" \
+                | fzf --prompt="Select theme: " --layout=reverse --height=50% \
+                      --header="  Tema actual: ${tema_actual}")
+            [[ -z "$tema" || "$tema" == "⬅  Volver" ]] && continue
+            sed -i "s/^ZSH_THEME=.*/ZSH_THEME=\"$tema\"/" ~/.zshrc
+            echo "Theme changed to $tema"
+            # Reemplaza el proceso actual por un zsh nuevo que ya carga el tema recién guardado
+            exec zsh
+            ;;
+        *"idioma anime"*)
+            nuevo_idioma=$([[ "$idioma_actual" == "es" ]] && echo "en" || echo "es")
+            echo "$nuevo_idioma" > "$LANG_FILE"
+            echo "Idioma de la info de anime cambiado a: $([[ "$nuevo_idioma" == "es" ]] && echo "Español" || echo "English")"
+            sleep 1
+            ;;
+        *"update noctalia"*)
+            git -C ~/.config/quickshell/noctalia pull
+            echo "Noctalia updated!"
+            read -p "Press Enter to continue..."
+            ;;
+        *"anime en emisión"*)
+            if ! command -v jq &>/dev/null; then
+                echo "❌ Falta: jq  →  sudo pacman -S jq"
+                read -p "Press Enter to continue..."
+                continue
+            fi
+            _anime_fetch
+            _anime_submenu
+            ;;
+        *"salir"*)
+            break
+            ;;
+    esac
+done

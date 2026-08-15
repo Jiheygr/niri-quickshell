@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Corré esto UNA VEZ después de tu primer login gráfico (Hyprland o
+# Niri ya tienen que estar corriendo). Pregunta al compositor los
+# valores exactos de refresh que aceptó para tus monitores, y
+# reescribe hyprland.lua / config.kdl con esos valores precisos.
+set -e
+
+if command -v hyprctl &>/dev/null && [ -f "$HOME/.config/hypr/hyprland.lua" ]; then
+  HYPR_CONF="$HOME/.config/hypr/hyprland.lua"
+  echo "🔎 Consultando hyprctl monitors..."
+  hyprctl monitors -j | jq -c '.[]' | while read -r mon; do
+    name=$(jq -r '.name' <<<"$mon")
+    width=$(jq -r '.width' <<<"$mon")
+    height=$(jq -r '.height' <<<"$mon")
+    hz=$(jq -r '.refreshRate' <<<"$mon")
+    newmode="${width}x${height}@${hz}"
+    echo "  → ${name}: ${newmode}"
+    awk -v conn="$name" -v newmode="$newmode" '
+      /hl\.monitor\(\{/ { inblock=1; cur="" }
+      inblock && match($0, /output = "([^"]*)"/, arr) { cur = arr[1] }
+      inblock && cur == conn && /mode = "/ {
+        sub(/mode = "[^"]*"/, "mode = \"" newmode "\"")
+      }
+      /\}\)/ { inblock=0 }
+      { print }
+    ' "$HYPR_CONF" >"${HYPR_CONF}.tmp" && mv "${HYPR_CONF}.tmp" "$HYPR_CONF"
+  done
+  echo "✅ hyprland.lua actualizado. Recargá con: hyprctl reload"
+fi
+
+if command -v niri &>/dev/null && [ -f "$HOME/.config/niri/config.kdl" ]; then
+  NIRI_CONF="$HOME/.config/niri/config.kdl"
+  echo "🔎 Consultando niri msg outputs..."
+  niri msg --json outputs | jq -r 'to_entries[] | "\(.key)|\(.value.modes[.value.current_mode].width)x\(.value.modes[.value.current_mode].height)|\(.value.modes[.value.current_mode].refresh_rate)"' | \
+  while IFS='|' read -r name res mhz; do
+    hz=$(awk -v m="$mhz" 'BEGIN{printf "%.3f", m/1000}')
+    newmode="${res}@${hz}"
+    echo "  → ${name}: ${newmode}"
+    awk -v conn="$name" -v newmode="$newmode" '
+      $0 ~ ("output \"" conn "\"") { inblock=1 }
+      inblock && /mode "/ { sub(/mode "[^"]*"/, "mode \"" newmode "\"") }
+      inblock && /^}/ { inblock=0 }
+      { print }
+    ' "$NIRI_CONF" >"${NIRI_CONF}.tmp" && mv "${NIRI_CONF}.tmp" "$NIRI_CONF"
+  done
+  echo "✅ config.kdl actualizado. Recargá con: niri msg action load-config-file (o reiniciá la sesión)"
+fi

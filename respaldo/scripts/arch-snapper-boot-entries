@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── Modo instalador del timer (opcional) ────────────────────────────
+# Uso: sudo arch-snapper-boot-entries --install-timer
+# Instala y activa el service+timer de systemd para que este script se
+# corra solo (a los 2 min de cada arranque, y después una vez al día).
+if [[ "${1:-}" == "--install-timer" ]]; then
+    SELF_PATH="$(readlink -f "$0")"
+
+    cat > /etc/systemd/system/arch-snapper-boot-entries.service <<EOF
+[Unit]
+Description=Regenerar entradas de boot de systemd-boot para snapshots de snapper
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=${SELF_PATH}
+EOF
+
+    cat > /etc/systemd/system/arch-snapper-boot-entries.timer <<'EOF'
+[Unit]
+Description=Corre arch-snapper-boot-entries diariamente y al arrancar
+
+[Timer]
+OnBootSec=2min
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now arch-snapper-boot-entries.timer
+
+    echo "✅ Timer instalado y activado."
+    systemctl list-timers | grep snapper-boot || true
+    exit 0
+fi
+
+ENTRIES_DIR="/boot/loader/entries"
+CONFIG="root"
+
+# Opciones del kernel (edítalas si quieres)
+OPTIONS="rw zswap.enabled=0 rootfstype=btrfs loglevel=3 quiet splash"
+
+# Detectar UUID automáticamente
+UUID=$(findmnt -no UUID /)
+
+# Detectar TODOS los kernels instalados (no solo el primero que encuentre).
+# Así, si tenés varios (linux, linux-zen, linux-cachyos, etc.) o cambiás de
+# uno a otro, las entradas de snapshot siguen funcionando para todos.
+mapfile -t KERNELS < <(find /boot -maxdepth 1 -name 'vmlinuz-*' -printf '%f\n' | sort)
+
+if [[ ${#KERNELS[@]} -eq 0 ]]; then
+    echo "❌ No se encontró ningún kernel (vmlinuz-*) en /boot" >&2
+    exit 1
+fi
+
+# Detectar microcódigo
+MICROCODE=""
+if [[ -f /boot/intel-ucode.img ]]; then
+    MICROCODE="intel-ucode.img"
+elif [[ -f /boot/amd-ucode.img ]]; then
+    MICROCODE="amd-ucode.img"
+fi
+
+# ── Entrada de Windows (chainload) ──────────────────────────────────
+# UUID de la partición ESP del disco de Windows (nvme0n1p1). Configurable
+# vía variable de entorno para no hardcodear el UUID de una máquina
+# específica; si no se define, simplemente se omite esta entrada.
+WINDOWS_ESP_UUID="${WINDOWS_ESP_UUID:-}"
+
+_ensure_windows_entry() {
+    if [[ -z "$WINDOWS_ESP_UUID" ]]; then
+        return
+    fi
+    local winesp_dev="/dev/disk/by-uuid/${WINDOWS_ESP_UUID}"
+
+    if [[ ! -e "$winesp_dev" ]]; then
+        echo "ℹ️  ESP de Windows (UUID ${WINDOWS_ESP_UUID}) no está conectada, salteando." >&2
+        return
+    fi
+
+    if [[ ! -f "/boot/EFI/Microsoft/Boot/bootmgfw.efi" ]]; then
+        echo "🪟 Copiando bootloader de Windows a la ESP local..."
+        local mnt
+        mnt=$(mktemp -d)
+        if mount "$winesp_dev" "$mnt" 2>/dev/null; then
+            mkdir -p /boot/EFI/Microsoft
+            cp -r "${mnt}/EFI/Microsoft/." /boot/EFI/Microsoft/ 2>/dev/null || \
+                echo "⚠️  No se pudo copiar el bootloader de Windows." >&2
+            umount "$mnt"
+        else
+            echo "⚠️  No se pudo montar la ESP de Windows, salteando." >&2
+        fi
+        rmdir "$mnt" 2>/dev/null || true
+    fi
+
+    if [[ ! -f "${ENTRIES_DIR}/windows.conf" ]]; then
+        {
+            echo "title    Windows"
+            echo "sort-key arch-windows"
+            echo "efi      /EFI/Microsoft/Boot/bootmgfw.efi"
+        } > "${ENTRIES_DIR}/windows.conf"
+        echo "✅ Entrada de Windows creada."
+    fi
+}
+
+_ensure_windows_entry
+
+# Limpiar entradas antiguas
+rm -f "${ENTRIES_DIR}"/snapshot-*.conf
+
+# Últimos 5 snapshots (excluyendo el #0 "current", que no es un snapshot real)
+mapfile -t SNAPSHOTS < <(
+    snapper -c "$CONFIG" list |
+    awk '/^[[:space:]]*[0-9]+/ {print $1}' |
+    awk '$1 != 0' |
+    tail -5
+)
+
+# Fecha/hora de cada snapshot (para mostrarla en el título de la entrada)
+declare -A SNAP_DATE
+while IFS='│' read -r f1 _ _ f4 _; do
+    num=$(tr -d '[:space:]' <<< "$f1")
+    [[ "$num" =~ ^[0-9]+$ ]] || continue
+    raw_date=$(sed -E 's/^[[:space:]]+|[[:space:]]+$//g' <<< "$f4")
+    [[ -z "$raw_date" ]] && continue
+    SNAP_DATE["$num"]=$(date -d "$raw_date" +"%d %b %H:%M" 2>/dev/null || echo "$raw_date")
+done < <(snapper -c "$CONFIG" list)
+
+for NUM in "${SNAPSHOTS[@]}"; do
+    SNAP_PATH="@/.snapshots/${NUM}/snapshot"
+    SNAP_WHEN="${SNAP_DATE[$NUM]:-}"
+
+    for KERNEL in "${KERNELS[@]}"; do
+        SUFFIX="${KERNEL#vmlinuz-}"
+        INITRAMFS="initramfs-${SUFFIX}.img"
+        UKI_PATH="/boot/EFI/Linux/arch-${SUFFIX}.efi"
+
+        if [[ -n "$SNAP_WHEN" ]]; then
+            TITLE="Snapshot #${NUM} (${SUFFIX}) — ${SNAP_WHEN}"
+        else
+            TITLE="Snapshot #${NUM} (${SUFFIX})"
+        fi
+
+        if [[ -f "$UKI_PATH" ]]; then
+            # Sistema con UKI (Unified Kernel Image): no hay vmlinuz/initrd
+            # sueltos, así que apuntamos directo al .efi ya armado y
+            # sobreescribimos rootflags vía "options" (systemd-boot agrega
+            # estos parámetros al cmdline embebido en la UKI; el último
+            # valor de un parámetro repetido, como rootflags=, es el que
+            # aplica al bootear).
+            {
+                echo "title   ${TITLE}"
+                echo "efi     /EFI/Linux/arch-${SUFFIX}.efi"
+                echo "options rootflags=subvol=${SNAP_PATH}"
+                echo "sort-key b-snapshot-${NUM}-${SUFFIX}"
+            } > "${ENTRIES_DIR}/snapshot-${NUM}-${SUFFIX}.conf"
+        elif [[ -f "/boot/${INITRAMFS}" ]]; then
+            # Sistema clásico (vmlinuz + initramfs sueltos, sin UKI).
+            {
+                echo "title   ${TITLE}"
+                echo "linux   /${KERNEL}"
+                [[ -n "$MICROCODE" ]] && echo "initrd  /${MICROCODE}"
+                echo "initrd  /${INITRAMFS}"
+                echo "options root=UUID=${UUID} rootflags=subvol=${SNAP_PATH} ${OPTIONS}"
+                echo "sort-key b-snapshot-${NUM}-${SUFFIX}"
+            } > "${ENTRIES_DIR}/snapshot-${NUM}-${SUFFIX}.conf"
+        else
+            echo "⚠️  Salteando ${KERNEL}: no se encontró ni UKI (${UKI_PATH}) ni initramfs (/boot/${INITRAMFS})" >&2
+            continue
+        fi
+    done
+done
+
+echo
+echo "Kernels detectados: ${KERNELS[*]}"
+echo "Entradas creadas:"
+ls "${ENTRIES_DIR}"/snapshot-*.conf

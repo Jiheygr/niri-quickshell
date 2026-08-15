@@ -1,0 +1,15 @@
+#!/bin/bash
+updates=$(checkupdates 2>/dev/null)
+count=$(echo "$updates" | grep -c '^')
+
+if [[ -n "$updates" ]]; then
+    action=$(notify-send -i software-update-available \
+        -t 0 \
+        -A "update=Actualizar ahora" \
+        "Actualizaciones disponibles" \
+        "$count paquete(s) pueden actualizarse.")
+
+    if [[ "$action" == "update" ]]; then
+        kitty -e update-system
+    fi
+fi
